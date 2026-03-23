@@ -15,6 +15,7 @@ import (
 	"github.com/betpro/server/internal/middleware"
 	"github.com/betpro/server/internal/server"
 	"github.com/betpro/server/internal/services"
+	"github.com/betpro/server/internal/websocket"
 	"github.com/betpro/server/pkg/logger"
 )
 
@@ -51,8 +52,15 @@ func main() {
 	userService := services.NewUserService(database)
 	profileCache := services.NewRedisProfileCache(redisClient)
 
+	wsHub := websocket.NewHub(redisClient, cfg.RedisWSChannel)
+	go wsHub.Run(ctx)
+
+	wsServer := websocket.NewServer(wsHub, authService)
+	betService := services.NewBetService(database, wsHub)
+
 	authHandler := handlers.NewAuthHandler(authService, userService, profileCache)
 	userHandler := handlers.NewUserHandler(userService)
+	betHandler := handlers.NewBetHandler(betService)
 
 	router := server.NewRouter()
 	router.Use(
@@ -67,11 +75,17 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	router.HandleFunc("GET /ws", wsServer.HandleWebSocket)
+
 	router.HandleFunc("POST /api/auth/register", authHandler.Register)
 	router.HandleFunc("POST /api/auth/login", authHandler.Login)
 
 	userGroup := router.Group("/api/users", middleware.Auth(authService, profileCache))
 	userGroup.HandleFunc("GET /profile", userHandler.GetProfile)
+
+	betGroup := router.Group("/api/bets", middleware.Auth(authService, profileCache))
+	betGroup.HandleFunc("POST /place", betHandler.PlaceBet)
+	betGroup.HandleFunc("GET /tickets", betHandler.GetTickets)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
